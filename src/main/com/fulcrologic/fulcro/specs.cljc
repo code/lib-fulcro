@@ -1,5 +1,6 @@
 (ns com.fulcrologic.fulcro.specs
   (:require
+    [malli.core]
     [clojure.spec.alpha :as s]
     [com.fulcrologic.guardrails.core :refer [>def]]
     [com.fulcrologic.fulcro.algorithms.do-not-use :as futil]

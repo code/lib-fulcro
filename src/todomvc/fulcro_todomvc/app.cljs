@@ -14,9 +14,7 @@
                  #{:remote}))
 
 (defonce app (with-react18
-               (btxn/with-batched-reads
-                 (app/fulcro-app {:remotes {:remote remote}})
-                 #{:remote})))
+               (app/fulcro-app {:remotes {:remote remote}})))
 
 #_(defonce app (app/fulcro-app {:remotes {:remote remote}}))
 

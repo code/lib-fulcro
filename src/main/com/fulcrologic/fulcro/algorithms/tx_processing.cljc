@@ -401,7 +401,7 @@
                              (not (and (= txn-id id) (= ele-idx idx)))) old-queue)]
     (swap! runtime-atom assoc-in [::send-queues remote] queue)))
 
-(>defn record-result!
+(defn record-result!
   "Record a network result on the given txn/element.
    If result-key is given it is used, otherwise defaults to ::results. Also removes the network send from the send
    queue so that remaining items can proceed, and schedules send processing."

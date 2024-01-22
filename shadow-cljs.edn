@@ -14,7 +14,7 @@
             :todomvc    {:target     :browser
                          :output-dir "resources/public/js/todomvc"
                          :asset-path "/js/todomvc"
-                         ;:dev        {:compiler-options {:external-config {:guardrails {}}}}
+                         :dev        {:compiler-options {:external-config {:guardrails {}}}}
                          :modules    {:main {:entries [fulcro-todomvc.main]}}
                          :devtools   {:preloads [com.fulcrologic.fulcro.inspect.preload
                                                  com.fulcrologic.fulcro.inspect.dom-picker-preload]}}

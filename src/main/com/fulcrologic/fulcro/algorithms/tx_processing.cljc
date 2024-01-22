@@ -16,6 +16,7 @@
     [com.fulcrologic.guardrails.malli.core :refer [>defn => | ?]]
     [edn-query-language.core :as eql]
     [taoensso.encore :as enc]
+    [taoensso.tufte :as t]
     [taoensso.timbre :as log]))
 
 (declare schedule-activation! process-queue! remove-send!)
@@ -86,10 +87,11 @@
 
 (>defn top-keys
   [{:keys [type key children] :as ast}]
-  [::ast => [:set :keyword]]
-  (if (= :root type)
-    (into #{} (map :key) children)
-    #{key}))
+  [::ast => [:set :any]]
+  (cond
+    (= :root type) (into #{} (keep :key) children)
+    key #{key}
+    :else #{}))
 
 (>defn combine-sends
   "Takes a send queue and returns a map containing a new combined send node that can act as a single network request,
@@ -167,33 +169,34 @@
   "Process the send queues against the remotes. Updates the send queues on the app and returns the updated send queues."
   [{:com.fulcrologic.fulcro.application/keys [runtime-atom] :as app}]
   [:com.fulcrologic.fulcro.application/app => ::send-queues]
-  (let [send-queues     (-> runtime-atom deref ::send-queues)
-        remote-names    (app->remote-names app)
-        operations      (atom [])
-        new-send-queues (reduce
-                          (fn [new-send-queues remote]
-                            (let [send-queue (get send-queues remote [])
-                                  [p serial] (extract-parallel send-queue)
-                                  front      (first serial)]
-                              ;; parallel items are removed from the queues, since they don't block anything
-                              (doseq [item p]
-                                (swap! operations conj #(net-send! app item remote)))
-                              ;; sequential items are kept in queue to prevent out-of-order operation
-                              (if (::active? front)
-                                (assoc new-send-queues remote serial)
-                                (let [{::keys [send-queue send-node]} (combine-sends app remote serial)]
-                                  (when send-node
-                                    (swap! operations conj #(net-send! app send-node remote)))
-                                  (assoc new-send-queues remote send-queue)))))
-                          {}
-                          remote-names)]
-    (swap! runtime-atom assoc ::send-queues new-send-queues)
-    ;; Actual net sends are done after we set the queues, in case the remote behave synchronously and immediately gives
-    ;; results (like errors). Otherwise, the queue updates of those handlers would be overwritten by our swap on the
-    ;; prior line
-    (doseq [op @operations]
-      (op))
-    new-send-queues))
+  (t/profile {:id 'process-send-queues}
+    (let [send-queues     (-> runtime-atom deref ::send-queues)
+          remote-names    (app->remote-names app)
+          operations      (atom [])
+          new-send-queues (reduce
+                            (fn [new-send-queues remote]
+                              (let [send-queue (get send-queues remote [])
+                                    [p serial] (extract-parallel send-queue)
+                                    front      (first serial)]
+                                ;; parallel items are removed from the queues, since they don't block anything
+                                (doseq [item p]
+                                  (swap! operations conj #(net-send! app item remote)))
+                                ;; sequential items are kept in queue to prevent out-of-order operation
+                                (if (::active? front)
+                                  (assoc new-send-queues remote serial)
+                                  (let [{::keys [send-queue send-node]} (combine-sends app remote serial)]
+                                    (when send-node
+                                      (swap! operations conj #(net-send! app send-node remote)))
+                                    (assoc new-send-queues remote send-queue)))))
+                            {}
+                            remote-names)]
+      (swap! runtime-atom assoc ::send-queues new-send-queues)
+      ;; Actual net sends are done after we set the queues, in case the remote behave synchronously and immediately gives
+      ;; results (like errors). Otherwise, the queue updates of those handlers would be overwritten by our swap on the
+      ;; prior line
+      (doseq [op @operations]
+        (op))
+      new-send-queues)))
 
 (>defn tx-node
   ([tx]
@@ -269,13 +272,14 @@
   Activation can be blocked by the tx-node options for things like waiting for the next render frame."
   [{:keys [:com.fulcrologic.fulcro.application/runtime-atom] :as app}]
   [:com.fulcrologic.fulcro.application/app => any?]
-  (let [{blocked true ready false} (group-by (comp boolean :after-render? ::options) (::submission-queue @runtime-atom))
-        dispatched-nodes (mapv #(dispatch-elements % (build-env app %) m/mutate) ready)]
-    (swap! runtime-atom (fn [a]
-                          (-> a
-                            (update ::active-queue #(reduce conj % dispatched-nodes))
-                            (assoc ::submission-queue (vec blocked)))))
-    (process-queue! app)))
+  (t/profile {:id 'activate}
+    (let [{blocked true ready false} (group-by (comp boolean :after-render? ::options) (::submission-queue @runtime-atom))
+          dispatched-nodes (mapv #(dispatch-elements % (build-env app %) m/mutate) ready)]
+      (swap! runtime-atom (fn [a]
+                            (-> a
+                              (update ::active-queue #(reduce conj % dispatched-nodes))
+                              (assoc ::submission-queue (vec blocked)))))
+      (process-queue! app))))
 
 (>defn schedule-activation!
   "Schedule activation of submitted transactions.  The default implementation copies all submitted transactions onto
@@ -401,7 +405,8 @@
                              (not (and (= txn-id id) (= ele-idx idx)))) old-queue)]
     (swap! runtime-atom assoc-in [::send-queues remote] queue)))
 
-(defn record-result!
+(macroexpand-1 '
+(>defn record-result!
   "Record a network result on the given txn/element.
    If result-key is given it is used, otherwise defaults to ::results. Also removes the network send from the send
    queue so that remaining items can proceed, and schedules send processing."
@@ -422,6 +427,7 @@
   ([app txn-id ele-idx remote result]
    [:com.fulcrologic.fulcro.application/app ::id int? keyword? any? => any?]
    (record-result! app txn-id ele-idx remote result ::results)))
+)
 
 (>defn compute-desired-ast-node
   "Add the ::desired-ast-nodes and ::transmitted-ast-nodes for `remote` to the tx-element based on the dispatch for the `remote` of the original mutation."
@@ -638,7 +644,7 @@
 (>defn requested-refreshes
   "Returns a set of refreshes that have been requested by active mutations in the queue"
   [app queue]
-  [:com.fulcrologic.fulcro.application/app [:set ::tx-node] => set?]
+  [:com.fulcrologic.fulcro.application/app [:sequential ::tx-node] => set?]
   (reduce
     (fn [outer-acc tx-node]
       (let [env (build-env app tx-node)]
@@ -685,24 +691,25 @@
   "Run through the active queue and do a processing step."
   [{:com.fulcrologic.fulcro.application/keys [state-atom runtime-atom] :as app}]
   [:com.fulcrologic.fulcro.application/app => any?]
-  (let [new-queue        (reduce
-                           (fn *pstep [new-queue n]
-                             (if-let [new-node (process-tx-node! app n)]
-                               (conj new-queue new-node)
-                               new-queue))
-                           []
-                           (::active-queue @runtime-atom))
-        accumulate       (fn [r items] (into (set r) items))
-        remotes          (app->remote-names app)
-        schedule-render! (ah/app-algorithm app :schedule-render!)
-        explicit-refresh (requested-refreshes app new-queue)
-        remotes-active?  (active-remotes new-queue remotes)]
-    (swap! state-atom assoc :com.fulcrologic.fulcro.application/active-remotes remotes-active?)
-    (swap! runtime-atom assoc ::active-queue new-queue)
-    (when (seq explicit-refresh)
-      (swap! runtime-atom update :com.fulcrologic.fulcro.application/to-refresh accumulate explicit-refresh))
-    (schedule-render! app)
-    nil))
+  (t/profile {:id 'process-queue}
+    (let [new-queue        (reduce
+                             (fn *pstep [new-queue n]
+                               (if-let [new-node (process-tx-node! app n)]
+                                 (conj new-queue new-node)
+                                 new-queue))
+                             []
+                             (::active-queue @runtime-atom))
+          accumulate       (fn [r items] (into (set r) items))
+          remotes          (app->remote-names app)
+          schedule-render! (ah/app-algorithm app :schedule-render!)
+          explicit-refresh (requested-refreshes app new-queue)
+          remotes-active?  (active-remotes new-queue remotes)]
+      (swap! state-atom assoc :com.fulcrologic.fulcro.application/active-remotes remotes-active?)
+      (swap! runtime-atom assoc ::active-queue new-queue)
+      (when (seq explicit-refresh)
+        (swap! runtime-atom update :com.fulcrologic.fulcro.application/to-refresh accumulate explicit-refresh))
+      (schedule-render! app)
+      nil)))
 
 (defn transact-sync!
   "Run the optimistic action(s) of a transaction synchronously. It is primarily used to deal with controlled inputs, since they

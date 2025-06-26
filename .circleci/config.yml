@@ -4,7 +4,8 @@ orbs:
 jobs:
   cljs:
     docker:
-      - image: cimg/clojure:1.12.0-browsers
+      - image: cimg/clojure:1.12.0-openjdk-17.0-browsers
+
     steps:
       - checkout
       - browser-tools/install_browser_tools
